@@ -1,0 +1,5 @@
+streamlit
+python-dotenv
+agno
+chromadb
+google-generativeai
