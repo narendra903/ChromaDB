@@ -6,7 +6,11 @@ from agno.embedder.google import GeminiEmbedder
 from agno.knowledge.pdf_url import PDFUrlKnowledgeBase
 from agno.models.google import Gemini
 from agno.vectordb.chroma import ChromaDB
-import pysqlite3 as sqlite3
+try:
+    import pysqlite3 as sqlite3
+except ImportError:
+    import sqlite3
+
 
 
 # Load environment variables
