@@ -109,9 +109,9 @@ async def initialize_knowledge_bases():
     status_text.text("📄 Loading Budget Local PDF Documents...")
     # Create CSV knowledge base
     await asyncio.sleep(1)
-    pdf_folder = Path("MULTIAGENTS/tmp/lancedb/pdffolder")
+    pdf_folder = Path(".")
     pdf_files = [  # Corrected to PDF but should be CSV
-        pdf_folder / "Union Budget FY25-26.pdf"          # Corrected to PDF but should be CSV
+        pdf_folder / "Union_Budget_FY25-26.pdf"           # Corrected to PDF but should be CSV
     ]
     combined_pdf_kb = []  #create a empty list to add the knowledge bases
     for pdf_file in pdf_files:
@@ -134,8 +134,6 @@ async def initialize_knowledge_bases():
             ]
         )
          combined_pdf_kb.append(pdf_kb) 
-    else:
-            st.warning(f"⚠️ PDF file not found: {pdf_file}")# add each knowledge base to the list
 
 
     status_text.text("📄 Loading Budget PDF Documents...")
