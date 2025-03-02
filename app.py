@@ -17,7 +17,6 @@ from agno.knowledge.pdf import PDFKnowledgeBase
 from agno.models.google import Gemini
 from textwrap import dedent
 from agno.vectordb.search import SearchType
-from agno.document.chunking.agentic import AgenticChunking
 import plotly.express as px
 import re
 
@@ -30,7 +29,6 @@ if not api_key:
 
 
 embedder = GeminiEmbedder(id="models/text-embedding-004", dimensions=768,api_key=api_key)
-chunking_strategy = AgenticChunking(embedder=embedder)
 
 # Custom CSS for gradient background
 page_bg_css = """
@@ -176,7 +174,6 @@ async def initialize_knowledge_bases():
 
     status_text.text("🌍 Fetching Budget Website Data...")
     website_urls = [
-        "https://www.india.gov.in/spotlight/union-budget-2025-2026",
         "https://www.india.gov.in/spotlight/union-budget-2024-25",
         "https://idronline.org/article/advocacy-government/budget-2025-understanding-social-sector-spending/?gad_source=1&gclid=CjwKCAiAlPu9BhAjEiwA5NDSA8hXbzwy3kj1HhhuaRlFZx4kgbgJsgDrPNIbigkD0WJQaocfzFZSwRoCnkYQAvD_BwE",
         "https://frontline.thehindu.com/news/india-budget-2025-key-announcements-tax-relief-agriculture-healthcare-reforms/article69167699.ece",
