@@ -12,7 +12,7 @@ from agno.embedder.google import GeminiEmbedder
 from agno.knowledge.pdf_url import PDFUrlKnowledgeBase
 from agno.knowledge.website import WebsiteKnowledgeBase
 from agno.knowledge.combined import CombinedKnowledgeBase
-from agno.document.chunking.document import DocumentChunking
+#from agno.document.chunking.document import DocumentChunking
 from agno.knowledge.pdf import PDFKnowledgeBase
 from agno.models.google import Gemini
 from textwrap import dedent
@@ -166,7 +166,7 @@ async def initialize_knowledge_bases():
                 embedder=embedder,
             ),
             name=f"Indian Budget Local PDF - {pdf_file.stem}",
-            chunking_strategy=DocumentChunking(chunk_size=5000, overlap=0),
+            #chunking_strategy=DocumentChunking(chunk_size=5000, overlap=0),
             instructions=[
                 "Prioritize checking the pdf for answers.",
                 "Chunk the pdf in a way that preserves context.",
@@ -212,7 +212,7 @@ async def initialize_knowledge_bases():
         urls=valid_urls,
         vector_db=vector_db,
         name="Indian Budget Records",
-        chunking_strategy=DocumentChunking(chunk_size=5000, overlap=0),
+        #chunking_strategy=DocumentChunking(chunk_size=5000, overlap=0),
         instructions=[
             "For user questions first check the pdf_knowledge_base.",
             "Divide the document into chunks that maintain context around key concepts.",
@@ -274,7 +274,9 @@ async def initialize_knowledge_bases():
             embedder=embedder,
         ),
     )
-    combined_knowledge_base.load(recreate=True)
+    # Load the combined knowledge base
+    await asyncio.sleep(1)  # Simulate async loading (replace with actual async load if available)
+    combined_knowledge_base.load(recreate=False)
 
     # Preprocess all PDFs in CombinedKnowledgeBase
     status_text.text("🖼️ Extracting Text and Images from Combined PDFs...")
