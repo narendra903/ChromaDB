@@ -176,7 +176,7 @@ async def initialize_knowledge_bases():
                 "Create self-contained information units that can provide a full answer to a query.",
             ]
         )
-        pdf_kb.load(recreate=True)
+        pdf_kb.load(recreate=False)
         combined_pdf_kb.append(pdf_kb)
         st.write(f"Loaded {pdf_file.name}")
     progress_bar.progress(30)
@@ -466,7 +466,7 @@ if st.button("🚀 Generate Response"):
         with st.spinner("📊 Analyzing budget data... Please wait."):
             try:
                 run_response = budget_agent.run(query, markdown=True)
-                st.write("Raw response object:", run_response)
+                #st.write("Raw response object:", run_response)
                 if run_response.content:
                     st.markdown(run_response.content, unsafe_allow_html=True)
                     # Check for relevant images in pdf_content_map
