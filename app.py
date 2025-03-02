@@ -19,6 +19,11 @@ from textwrap import dedent
 from agno.vectordb.search import SearchType
 import plotly.express as px
 import re
+import pdfplumber  # For text and image extraction
+import PyPDF2  # For fallback text extraction
+from pdf2image import convert_from_path  # For converting PDF to images
+import pytesseract  # For OCR on images
+from PIL import Image  # For image handling
 
 # Load environment variables
 load_dotenv()
@@ -27,8 +32,7 @@ if not api_key:
     st.error("⚠️ API Key not found. Please set GEMINI_API_KEY in .env.")
     st.stop()
 
-
-embedder = GeminiEmbedder(id="models/text-embedding-004", dimensions=768,api_key=api_key)
+embedder = GeminiEmbedder(id="models/text-embedding-004", dimensions=768, api_key=api_key)
 
 # Custom CSS for gradient background
 page_bg_css = """
@@ -80,7 +84,9 @@ async def fetch_url(session, url):
     try:
         async with session.get(url) as response:
             if response.status == 200:
-                return url, await response.read()
+                content = await response.read()
+                st.write(f"Successfully fetched {url} ({len(content)} bytes)")
+                return url, content
             else:
                 st.warning(f"⚠️ Failed to fetch {url}: Status {response.status}")
                 return url, None
@@ -88,52 +94,94 @@ async def fetch_url(session, url):
         st.warning(f"⚠️ Error fetching {url}: {str(e)}")
         return url, None
 
+# Function to extract text and images from a PDF file
+def extract_pdf_content(pdf_path):
+    text = ""
+    images = []
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for i, page in enumerate(pdf.pages):
+                # Extract text
+                page_text = page.extract_text() or ""
+                text += page_text + "\n"
+                
+                # Extract images
+                for img in page.images:
+                    img_bbox = (img["x0"], img["top"], img["x1"], img["bottom"])
+                    cropped_img = page.within_bbox(img_bbox).to_image()
+                    img_path = f"tmp/images/{os.path.basename(pdf_path)}_page{i}_img{len(images)}.png"
+                    os.makedirs("tmp/images", exist_ok=True)
+                    cropped_img.save(img_path)
+                    images.append(img_path)
+        
+        # If no text extracted, try OCR
+        if not text.strip():
+            st.warning(f"No text extracted from {pdf_path}. Attempting OCR...")
+            pdf_images = convert_from_path(pdf_path)
+            for i, img in enumerate(pdf_images):
+                ocr_text = pytesseract.image_to_string(img)
+                text += ocr_text + "\n"
+                img_path = f"tmp/images/{os.path.basename(pdf_path)}_page{i}_ocr.png"
+                img.save(img_path, "PNG")
+                images.append(img_path)
+        
+        return text, images
+    except Exception as e:
+        st.error(f"Error extracting content from {pdf_path}: {str(e)}")
+        return "", []
+
 # Function to initialize knowledge bases asynchronously
-@st.cache_resource(ttl=86400)  # Cache for 24 hours
+@st.cache_resource(ttl=86400)
 async def initialize_knowledge_bases():
-    progress_bar = st.progress(0, text="Initializing Vector DB...")
+    progress_bar = st.progress(0)
     status_text = st.empty()
 
     status_text.text("🔄 Initializing Vector DB...")
-    await asyncio.sleep(1)  # Simulate DB setup (replace with actual async init if available)
+    await asyncio.sleep(1)
     vector_db = LanceDb(
         table_name="budget",
         uri="tmp/lancedb",
         search_type=SearchType.vector,
         embedder=embedder,
     )
-    progress_bar.progress(30, text="📄 Loading Budget Local PDF Documents...")
-    await asyncio.sleep(1)
+    progress_bar.progress(10)
+
+    # Local PDFs
     status_text.text("📄 Loading Budget Local PDF Documents...")
-    # Create CSV knowledge base
-    await asyncio.sleep(1)
     pdf_folder = Path(".")
-    pdf_files = [  # Corrected to PDF but should be CSV
-        pdf_folder / "Union_Budget_FY25-26.pdf"           # Corrected to PDF but should be CSV
-    ]
-    combined_pdf_kb = []  #create a empty list to add the knowledge bases
+    pdf_files = [pdf_folder / "Union_Budget_FY25-26.pdf"]
+    combined_pdf_kb = []
+
     for pdf_file in pdf_files:
-         pdf_kb = PDFKnowledgeBase(
-            path = pdf_file, # changed the path to be a variable for each csv file
-            vector_db= LanceDb(
+        if not pdf_file.exists():
+            st.error(f"PDF file not found: {pdf_file}")
+            continue
+        
+        pdf_kb = PDFKnowledgeBase(
+            path=pdf_file,
+            vector_db=LanceDb(
                 table_name=f"pdf_{pdf_file.stem}",
                 uri="tmp/lancedb",
                 search_type=SearchType.vector,
                 embedder=embedder,
             ),
-            name=f"Indian Budget PDF - {pdf_file.name}",
+            name=f"Indian Budget Local PDF - {pdf_file.stem}",
+            chunking_strategy=DocumentChunking(chunk_size=5000, overlap=0),
             instructions=[
-                "Prioritize checking the CSV for answers.",
-                "Chunk the CSV in a way that preserves context.",
+                "Prioritize checking the pdf for answers.",
+                "Chunk the pdf in a way that preserves context.",
                 "Ensure important sections like summaries and conclusions remain intact.",
                 "Maintain the integrity of the logical sections if needed.",
                 "Each chunk should provide enough information to answer questions independently.",
                 "Create self-contained information units that can provide a full answer to a query.",
             ]
         )
-         combined_pdf_kb.append(pdf_kb) 
+        pdf_kb.load(recreate=True)
+        combined_pdf_kb.append(pdf_kb)
+        st.write(f"Loaded {pdf_file.name}")
+    progress_bar.progress(30)
 
-
+    # PDF URLs
     status_text.text("📄 Loading Budget PDF Documents...")
     pdf_urls = [
         "https://www.indiabudget.gov.in/doc/rec/allrec.pdf",
@@ -153,16 +201,18 @@ async def initialize_knowledge_bases():
         "https://static.pib.gov.in/WriteReadData/specificdocs/documents/2025/feb/doc202521492801.pdf",
         "https://www.indiabudget.gov.in/budget2024-25/doc/Key_to_Budget_Document_2024.pdf",
     ]
-
     async with ClientSession() as session:
         tasks = [fetch_url(session, url) for url in pdf_urls]
         results = await asyncio.gather(*tasks)
-        valid_urls = [url for url, content in results if content is not None]
-
+        valid_urls = [url for url, content in results if content is not None and len(content) > 0]
+        if not valid_urls:
+            st.error("No valid PDF URLs fetched!")
+    
     pdf_knowledge_base = PDFUrlKnowledgeBase(
         urls=valid_urls,
         vector_db=vector_db,
         name="Indian Budget Records",
+        chunking_strategy=DocumentChunking(chunk_size=5000, overlap=0),
         instructions=[
             "For user questions first check the pdf_knowledge_base.",
             "Divide the document into chunks that maintain context around key concepts.",
@@ -170,22 +220,25 @@ async def initialize_knowledge_bases():
             "Each chunk should provide enough information to answer questions independently."
         ]
     )
-    progress_bar.progress(60,text="📄 Loading Budget PDF Documents...")
+    progress_bar.progress(60)
 
+    # Websites
     status_text.text("🌍 Fetching Budget Website Data...")
     website_urls = [
+        "https://www.india.gov.in/spotlight/union-budget-2025-2026",
+        "https://www.bajajfinserv.in/investments/income-tax-slabs",
         "https://www.india.gov.in/spotlight/union-budget-2024-25",
-        "https://idronline.org/article/advocacy-government/budget-2025-understanding-social-sector-spending/?gad_source=1&gclid=CjwKCAiAlPu9BhAjEiwA5NDSA8hXbzwy3kj1HhhuaRlFZx4kgbgJsgDrPNIbigkD0WJQaocfzFZSwRoCnkYQAvD_BwE",
+        "https://idronline.org/article/advocacy-government/budget-2025-understanding-social-sector-spending/",
         "https://frontline.thehindu.com/news/india-budget-2025-key-announcements-tax-relief-agriculture-healthcare-reforms/article69167699.ece",
-        "https://www.moneycontrol.com/budget/budget-2025-speech-highlights-key-announcements-of-nirmala-sitharaman-in-union-budget-of-india-article-12926372.html",
-        "https://www.bajajfinserv.in/investments/income-tax-slabs"
+        "https://www.moneycontrol.com/budget/budget-2025-speech-highlights-key-announcements-of-nirmala-sitharaman-in-union-budget-of-india-article-12926372.html"
     ]
-
     async with ClientSession() as session:
         tasks = [fetch_url(session, url) for url in website_urls]
         results = await asyncio.gather(*tasks)
-        valid_website_urls = [url for url, content in results if content is not None]
-
+        valid_website_urls = [url for url, content in results if content is not None and len(content) > 0]
+        if not valid_website_urls:
+            st.error("No valid website URLs fetched!")
+    
     website_knowledge_base = WebsiteKnowledgeBase(
         urls=valid_website_urls,
         vector_db=LanceDb(
@@ -208,8 +261,9 @@ async def initialize_knowledge_bases():
             "Extract exact information related to the user query."
         ]
     )
-    progress_bar.progress(80,text="🌍 Fetching Budget Website Data...")
+    progress_bar.progress(80)
 
+    # Combine Knowledge Bases
     status_text.text("🔍 Combining Knowledge Bases...")
     combined_knowledge_base = CombinedKnowledgeBase(
         sources=[pdf_knowledge_base, website_knowledge_base] + combined_pdf_kb,
@@ -220,9 +274,31 @@ async def initialize_knowledge_bases():
             embedder=embedder,
         ),
     )
+    combined_knowledge_base.load(recreate=True)
 
-    await asyncio.sleep(1)  # Simulate async loading (replace with actual async load if available)
-    combined_knowledge_base.load(recreate=False)
+    # Preprocess all PDFs in CombinedKnowledgeBase
+    status_text.text("🖼️ Extracting Text and Images from Combined PDFs...")
+    pdf_paths = [pdf_file for pdf_file in pdf_files]  # Local PDFs
+    url_pdf_paths = []
+    for url, content in results:
+        if url in valid_urls:
+            temp_path = f"tmp/{os.path.basename(url)}"
+            os.makedirs("tmp", exist_ok=True)
+            with open(temp_path, "wb") as f:
+                f.write(content)
+            url_pdf_paths.append(Path(temp_path))
+    
+    all_pdfs = pdf_paths + url_pdf_paths
+    pdf_content_map = {}
+
+    for pdf_path in all_pdfs:
+        text, images = extract_pdf_content(pdf_path)
+        if text or images:
+            pdf_content_map[str(pdf_path)] = {"text": text, "images": images}
+            st.write(f"Processed {pdf_path}: {len(text)} chars, {len(images)} images")
+
+    # Store in session state for agent access
+    st.session_state.pdf_content_map = pdf_content_map
 
     progress_bar.progress(100)
     status_text.text("✅ Knowledge Base Loaded Successfully!")
@@ -230,7 +306,6 @@ async def initialize_knowledge_bases():
 
 # Load knowledge base in session state
 if 'combined_knowledge_base' not in st.session_state:
-    # Run async function in Streamlit's event loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     st.session_state.combined_knowledge_base = loop.run_until_complete(initialize_knowledge_bases())
@@ -242,9 +317,10 @@ knowledge_agent = Agent(
     search_knowledge=True,
     description="📖 Expert on Indian Budget Documents & Websites",
     instructions=[
-        "When answering user questions, first delegating the query to  knowledge base for accurate information.",
+        "When answering user questions, first delegate the query to the knowledge base and prioritize checking local PDF documents (e.g., Union Budget FY25-26.pdf) for accurate information.",
+        "If the answer is not found in the local PDFs, then check other sources in the knowledge base (e.g., PDF URLs and websites).",
         "If the answer is not found in the knowledge base, automatically use DuckDuckGoTools for further web research.",
-        "Present your response in a formal manner with headings like 'Overview', 'Details', 'Conclusion', Visualization,etc.",
+        "Present your response in a formal manner with headings like 'Overview', 'Details', 'Conclusion', 'Visualization', 'additional information' etc.",
         "For complex queries, break them down into simpler parts if necessary.",
         "Ensure responses are accurate and reference the document or website explicitly where possible.",
         "Use markdown for formatting responses, including bullet points and tables where appropriate.",
@@ -274,8 +350,6 @@ searcher = Agent(
         "If the query is ambiguous or requires further clarification, ask for more details from the user.",
         "Keep responses formal and precise, always citing or referencing the source of information when possible.",
         "Use bullet points for clarity."
-        "**📈 Data Visualization** (if applicable)"
-        "**Table**: For numerical comparisons, e.g."
     ],
     tools=[DuckDuckGoTools()],
     show_tool_calls=True,
@@ -308,12 +382,12 @@ budget_agent = Agent(
           - **✅ Conclusion**: Summarize key takeaways, expected outcomes, or areas for further research.
           -- **Numerical Data**: Tables or figures for budgetary allocations and expenditures.
           -- **Sources**: Cite documents or URLs where applicable.
+        - Enhance the response with images from st.session_state.pdf_content_map if relevant to the query.
         - Comparisons with previous budgets for trend analysis.
         - Use markdown for formatting outputs, including bullet points, tables, or code blocks for clarity.
         - If the query lacks clarity, prompt the user for additional details or clarification.
         - Maintain a formal and professional tone in responses, always citing sources where applicable.
-        "- Use bullet points for clarity."
-        
+        - Use bullet points for clarity.
     """),
     expected_output=dedent("""\
         # {Compelling Headline}                   
@@ -337,6 +411,7 @@ budget_agent = Agent(
         - Last updated timestamps for time-sensitive data                           
         ## Sources & Methodology
         - Description of research process and sources
+        - page number of pdfs and source page name and file name
         ## For technical queries:
         - Create flowchart for complex processes
         - Use code blocks for formula explanations
@@ -350,6 +425,7 @@ budget_agent = Agent(
         - "**📈 Data Visualization** (if applicable):"
         - "**Table**: For numerical comparisons, "
         - Include tables/pie charts when data is sufficient (3+ points) and relevant.
+        - Include extracted images (e.g., charts) from PDFs when relevant.
         ---
         Research conducted by Financial Agent
         Credit Rating Style Report
@@ -386,11 +462,17 @@ st.markdown(button_css, unsafe_allow_html=True)
 if st.button("🚀 Generate Response"):
     if query:
         with st.spinner("📊 Analyzing budget data... Please wait."):
-            st.session_state.response_container = st.empty() # added a session state
-            with st.session_state.response_container:
-                try:
-                    run_response = budget_agent.run(query, markdown=True)
+            try:
+                run_response = budget_agent.run(query, markdown=True)
+                st.write("Raw response object:", run_response)
+                if run_response.content:
                     st.markdown(run_response.content, unsafe_allow_html=True)
+                    # Check for relevant images in pdf_content_map
+                    if "pdf_content_map" in st.session_state:
+                        for pdf_path, content in st.session_state.pdf_content_map.items():
+                            if any(query.lower() in content["text"].lower() for q in query.split()):
+                                for img_path in content["images"]:
+                                    st.image(img_path, caption=f"Chart from {os.path.basename(pdf_path)}")
                     # Check for pie chart data in response
                     pie_chart_match = re.search(r"Pie Chart:.*?(?=###|\n\n|$)", run_response.content, re.DOTALL)
                     if pie_chart_match:
@@ -404,10 +486,12 @@ if st.button("🚀 Generate Response"):
                                 values.append(float(value.strip().replace("%", "")))
                         fig = px.pie(values=values, names=labels, title="Budget Allocation")
                         st.plotly_chart(fig)
-                except Exception as e:
-                    st.error(f"⚠️ An error occurred: {str(e)}. Please try again or contact support.")
+                else:
+                    st.error("Agent returned no content!")
+            except Exception as e:
+                st.error(f"⚠️ An error occurred: {str(e)}. Please try again or contact support.")
     else:
-            st.warning("⚠️ Please enter a query before generating a response!")
+        st.warning("⚠️ Please enter a query before generating a response!")
 
 # Sidebar Info
 st.sidebar.header("ℹ️ About")
@@ -422,7 +506,7 @@ st.sidebar.subheader("⚙️ How It Works")
 st.sidebar.markdown("""
 1️⃣ **Knowledge Base Search** 📚  
 2️⃣ **Web Search (if needed)** 🌍  
-3️⃣ **Formatted AI Response** 📊  
+3️⃣ **Formatted AI Response with Images** 📊  
 """)
 
 st.sidebar.subheader("💡 Example Queries")
@@ -440,7 +524,7 @@ st.sidebar.markdown("📩 Email: narendra.insights@gmail.com")
 # Footer
 st.markdown("---")
 st.markdown(
-    "🛠️ **Built with AI & Love ❤️** | 📅 *Updated: 2025* | "
+    "🛠️ **Built with AI ** | 📅 *Updated: 2025* | 📩 Email: narendra.insights@gmail.com "
     "[<img src='https://content.linkedin.com/content/dam/me/business/en-us/amp/brand-site/v2/bg/LI-Bug.svg.original.svg' width='20' height='20'>](https://www.linkedin.com/in/nk-analytics/)"
     " Connect on LinkedIn",
     unsafe_allow_html=True,
