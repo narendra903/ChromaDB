@@ -12,7 +12,6 @@ from agno.embedder.google import GeminiEmbedder
 from agno.knowledge.pdf_url import PDFUrlKnowledgeBase
 from agno.knowledge.website import WebsiteKnowledgeBase
 from agno.knowledge.combined import CombinedKnowledgeBase
-#from agno.document.chunking.document import DocumentChunking
 from agno.knowledge.pdf import PDFKnowledgeBase
 from agno.models.google import Gemini
 from textwrap import dedent
@@ -94,27 +93,40 @@ async def fetch_url(session, url):
         st.warning(f"⚠️ Error fetching {url}: {str(e)}")
         return url, None
 
-# Function to extract text and images from a PDF file
+# Function to extract text and images from a PDF file with context
 def extract_pdf_content(pdf_path):
     text = ""
-    images = []
+    image_data = []  # List of dicts: {"path": str, "context": str, "ocr_text": str}
     try:
         with pdfplumber.open(pdf_path) as pdf:
             for i, page in enumerate(pdf.pages):
-                # Extract text
+                # Extract page text
                 page_text = page.extract_text() or ""
                 text += page_text + "\n"
                 
-                # Extract images
+                # Extract images with context
                 for img in page.images:
                     img_bbox = (img["x0"], img["top"], img["x1"], img["bottom"])
+                    # Extract text near the image (e.g., caption or surrounding text)
+                    context_bbox = (img["x0"] - 50, img["top"] - 50, img["x1"] + 50, img["bottom"] + 50)
+                    context_text = page.within_bbox(context_bbox, strict=False).extract_text() or ""
+                    
+                    # Save the image
                     cropped_img = page.within_bbox(img_bbox).to_image()
-                    img_path = f"tmp/images/{os.path.basename(pdf_path)}_page{i}_img{len(images)}.png"
+                    img_path = f"tmp/images/{os.path.basename(pdf_path)}_page{i}_img{len(image_data)}.png"
                     os.makedirs("tmp/images", exist_ok=True)
                     cropped_img.save(img_path)
-                    images.append(img_path)
+                    
+                    # OCR the image to extract embedded text
+                    ocr_text = pytesseract.image_to_string(Image.open(img_path))
+                    
+                    image_data.append({
+                        "path": img_path,
+                        "context": context_text,
+                        "ocr_text": ocr_text
+                    })
         
-        # If no text extracted, try OCR
+        # If no text extracted from the PDF, try OCR on the whole document
         if not text.strip():
             st.warning(f"No text extracted from {pdf_path}. Attempting OCR...")
             pdf_images = convert_from_path(pdf_path)
@@ -123,9 +135,13 @@ def extract_pdf_content(pdf_path):
                 text += ocr_text + "\n"
                 img_path = f"tmp/images/{os.path.basename(pdf_path)}_page{i}_ocr.png"
                 img.save(img_path, "PNG")
-                images.append(img_path)
+                image_data.append({
+                    "path": img_path,
+                    "context": "Full page OCR",
+                    "ocr_text": ocr_text
+                })
         
-        return text, images
+        return text, image_data
     except Exception as e:
         st.error(f"Error extracting content from {pdf_path}: {str(e)}")
         return "", []
@@ -166,7 +182,6 @@ async def initialize_knowledge_bases():
                 embedder=embedder,
             ),
             name=f"Indian Budget Local PDF - {pdf_file.stem}",
-            #chunking_strategy=DocumentChunking(chunk_size=5000, overlap=0),
             instructions=[
                 "Prioritize checking the pdf for answers.",
                 "Chunk the pdf in a way that preserves context.",
@@ -212,7 +227,6 @@ async def initialize_knowledge_bases():
         urls=valid_urls,
         vector_db=vector_db,
         name="Indian Budget Records",
-        #chunking_strategy=DocumentChunking(chunk_size=5000, overlap=0),
         instructions=[
             "For user questions first check the pdf_knowledge_base.",
             "Divide the document into chunks that maintain context around key concepts.",
@@ -274,13 +288,11 @@ async def initialize_knowledge_bases():
             embedder=embedder,
         ),
     )
-    # Load the combined knowledge base
-    await asyncio.sleep(1)  # Simulate async loading (replace with actual async load if available)
+    await asyncio.sleep(1)  # Simulate async loading
     combined_knowledge_base.load(recreate=False)
 
-    # Preprocess all PDFs in CombinedKnowledgeBase
-    status_text.text("🖼️ Extracting Text and Images from Combined PDFs...")
-    pdf_paths = [pdf_file for pdf_file in pdf_files]  # Local PDFs
+    # Preprocess URL PDFs only
+    status_text.text("🖼️ Extracting Text and Images from PDFs...")
     url_pdf_paths = []
     for url, content in results:
         if url in valid_urls:
@@ -290,16 +302,22 @@ async def initialize_knowledge_bases():
                 f.write(content)
             url_pdf_paths.append(Path(temp_path))
     
-    all_pdfs = pdf_paths + url_pdf_paths
     pdf_content_map = {}
+    # Process local PDFs
+    for pdf_file in pdf_files:
+        text, image_data = extract_pdf_content(pdf_file)
+        if text or image_data:
+            pdf_content_map[str(pdf_file)] = {"text": text, "images": image_data}
+            st.write(f"Processed {pdf_file}: {len(text)} chars, {len(image_data)} images")
 
-    for pdf_path in all_pdfs:
-        text, images = extract_pdf_content(pdf_path)
-        if text or images:
-            pdf_content_map[str(pdf_path)] = {"text": text, "images": images}
-            st.write(f"Processed {pdf_path}: {len(text)} chars, {len(images)} images")
+    # Process URL PDFs
+    for pdf_path in url_pdf_paths:
+        text, image_data = extract_pdf_content(pdf_path)
+        if text or image_data:
+            pdf_content_map[str(pdf_path)] = {"text": text, "images": image_data}
+            st.write(f"Processed {pdf_path}: {len(text)} chars, {len(image_data)} images")
 
-    # Store in session state for agent access
+    # Store in session state
     st.session_state.pdf_content_map = pdf_content_map
 
     progress_bar.progress(100)
@@ -384,7 +402,7 @@ budget_agent = Agent(
           - **✅ Conclusion**: Summarize key takeaways, expected outcomes, or areas for further research.
           -- **Numerical Data**: Tables or figures for budgetary allocations and expenditures.
           -- **Sources**: Cite documents or URLs where applicable.
-        - Enhance the response with images from st.session_state.pdf_content_map if relevant to the query.
+        - Enhance the response with relevant images from st.session_state.pdf_content_map based on query context.
         - Comparisons with previous budgets for trend analysis.
         - Use markdown for formatting outputs, including bullet points, tables, or code blocks for clarity.
         - If the query lacks clarity, prompt the user for additional details or clarification.
@@ -427,7 +445,7 @@ budget_agent = Agent(
         - "**📈 Data Visualization** (if applicable):"
         - "**Table**: For numerical comparisons, "
         - Include tables/pie charts when data is sufficient (3+ points) and relevant.
-        - Include extracted images (e.g., charts) from PDFs when relevant.
+        - Include extracted images from PDFs when relevant.
         ---
         Research conducted by Financial Agent
         Credit Rating Style Report
@@ -466,15 +484,22 @@ if st.button("🚀 Generate Response"):
         with st.spinner("📊 Analyzing budget data... Please wait."):
             try:
                 run_response = budget_agent.run(query, markdown=True)
-                #st.write("Raw response object:", run_response)
                 if run_response.content:
                     st.markdown(run_response.content, unsafe_allow_html=True)
                     # Check for relevant images in pdf_content_map
                     if "pdf_content_map" in st.session_state:
                         for pdf_path, content in st.session_state.pdf_content_map.items():
+                            # Check full text for general relevance
                             if any(query.lower() in content["text"].lower() for q in query.split()):
-                                for img_path in content["images"]:
-                                    st.image(img_path, caption=f"Chart from {os.path.basename(pdf_path)}")
+                                for img in content["images"]:
+                                    # Filter images by context and OCR text
+                                    combined_text = img["context"].lower() + " " + img["ocr_text"].lower()
+                                    if any(q.lower() in combined_text for q in query.split()):
+                                        # Use context for a dynamic caption
+                                        caption = f"Image from {os.path.basename(pdf_path)}"
+                                        if img["context"].strip():
+                                            caption = f"Image: {img['context'][:50]}... from {os.path.basename(pdf_path)}"
+                                        st.image(img["path"], caption=caption)
                     # Check for pie chart data in response
                     pie_chart_match = re.search(r"Pie Chart:.*?(?=###|\n\n|$)", run_response.content, re.DOTALL)
                     if pie_chart_match:
